@@ -1,0 +1,3 @@
+build/*
+dist/*
+ec2_check_reserved_instances.egg-info/*

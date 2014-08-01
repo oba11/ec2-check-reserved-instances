@@ -7,11 +7,13 @@ import boto.ec2
 import logging
 from pprint import pformat
 import argparse
+from collections import defaultdict
 
 def main():
 	parser = argparse.ArgumentParser(description='Cross reference existing reservations to current instances.')
 	parser.add_argument('--log', default="WARN", help='Change log level (default: WARN)')
 	parser.add_argument('--region', default='us-east-1', help='AWS Region to connect to')
+	parser.add_argument('-n', '--names', help="Include names or instance IDs of instances that fit non-reservations", required=False, action='store_true')
 
 	args = parser.parse_args()
 
@@ -22,6 +24,7 @@ def main():
 	reservations = ec2_conn.get_all_instances()
 
 	running_instances = {}
+	instance_ids = defaultdict(list)
 	for reservation in reservations:
 		for instance in reservation.instances:
 			if instance.state != "running":
@@ -32,6 +35,11 @@ def main():
 				az = instance.placement
 				instance_type = instance.instance_type
 				running_instances[ (instance_type, az ) ] = running_instances.get( (instance_type, az ) , 0 ) + 1
+
+				if "Name" in instance.tags and len(instance.tags['Name']) > 0:
+					instance_ids[ (instance_type, az ) ].append(instance.tags['Name'])
+				else:
+					instance_ids[ (instance_type, az ) ].append(instance.id)
 
 
 	logger.debug("Running instances: %s"% pformat(running_instances))
@@ -62,6 +70,7 @@ def main():
 	if unused_reservations == {}:
 		print "Congratulations, you have no unused reservations"
 	else:
+		ids=""
 		for unused_reservation in unused_reservations:
 			print "UNUSED RESERVATION!\t(%s)\t%s\t%s" % ( unused_reservations[ unused_reservation ], unused_reservation[0], unused_reservation[1] )
 
@@ -72,9 +81,18 @@ def main():
 		print "Congratulations, you have no unreserved instances"
 	else:
 		for unreserved_instance in unreserved_instances:
-			print "Instance not reserved:\t(%s)\t%s\t%s" % ( unreserved_instances[ unreserved_instance ], unreserved_instance[0], unreserved_instance[1] )
+			if args.names:
+				ids = ', '.join(sorted(instance_ids[unreserved_instance]))
+			print "Instance not reserved:\t(%s)\t%s\t%s\t%s" % ( unreserved_instances[ unreserved_instance ], unreserved_instance[0], unreserved_instance[1], ids )
 
-	qty_running_instances = reduce( lambda x, y: x+y, running_instances.values() )
-	qty_reserved_instances = reduce( lambda x, y: x+y, reserved_instances.values() )
+	if running_instances.values():
+		qty_running_instances = reduce( lambda x, y: x+y, running_instances.values() )
+	else:
+		qty_running_instances = 0
+
+	if reserved_instances.values():
+		qty_reserved_instances = reduce( lambda x, y: x+y, reserved_instances.values() )
+	else:
+		qty_reserved_instances = 0
 
 	print "\n(%s) running on-demand instances\n(%s) reservations" % ( qty_running_instances, qty_reserved_instances )
