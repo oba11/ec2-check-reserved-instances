@@ -2,8 +2,7 @@
 
 import sys
 import os
-import boto
-import boto.ec2
+import boto3
 import logging
 from pprint import pformat
 import argparse
@@ -20,38 +19,43 @@ def main():
 	logging.basicConfig(level=getattr(logging,args.log))
 	logger = logging.getLogger('ec2-check')
 
-	ec2_conn = boto.ec2.connect_to_region(args.region)
-	reservations = ec2_conn.get_all_instances()
+	client = boto3.client('ec2', region_name=args.region)
+	response = client.describe_instances()
 
 	running_instances = {}
 	instance_ids = defaultdict(list)
-	for reservation in reservations:
-		for instance in reservation.instances:
-			if instance.state != "running":
-				logger.debug("Disqualifying instance %s: not running\n" % ( instance.id ) )
-			elif instance.spot_instance_request_id:
-				logger.debug("Disqualifying instance %s: spot\n" % ( instance.id ) )
+	for reservation in response['Reservations']:
+		for instance in reservation['Instances']:
+			if instance['State'].get('Name') != "running":
+				logger.debug("Disqualifying instance %s: not running\n" % ( instance['InstanceId'] ) )
+			elif instance.get('InstanceLifecycle') == 'spot':
+				logger.debug("Disqualifying instance %s: spot\n" % ( instance['InstanceId'] ) )
 			else:
-				az = instance.placement
-				instance_type = instance.instance_type
+				az = instance['Placement']['AvailabilityZone']
+				instance_type = instance['InstanceType']
 				running_instances[ (instance_type, az ) ] = running_instances.get( (instance_type, az ) , 0 ) + 1
 
-				if "Name" in instance.tags and len(instance.tags['Name']) > 0:
-					instance_ids[ (instance_type, az ) ].append(instance.tags['Name'])
-				else:
-					instance_ids[ (instance_type, az ) ].append(instance.id)
+				for tag in instance['Tags']:
+					if "Name" == tag['Key'] and len(tag['Value']) > 0:
+						tag_name = tag['Value']
+						break
+					else:
+						continue
+				tag_name = tag_name if tag_name else instance['InstanceId']
+				instance_ids[ (instance_type, az ) ].append(tag_name)
 
 
 	logger.debug("Running instances: %s"% pformat(running_instances))
 
 	reserved_instances = {}
-	for reserved_instance in ec2_conn.get_all_reserved_instances():
-		if reserved_instance.state != "active":
-			logger.debug( "Excluding reserved instances %s: no longer active\n" % ( reserved_instance.id ) )
+	response = client.describe_reserved_instances()
+	for reserved_instance in response['ReservedInstances']:
+		if reserved_instance['State'] != "active":
+			logger.debug( "Excluding reserved instances %s: no longer active\n" % ( reserved_instance['ReservedInstancesId'] ) )
 		else:
-			az = reserved_instance.availability_zone
-			instance_type = reserved_instance.instance_type
-			reserved_instances[( instance_type, az) ] = reserved_instances.get ( (instance_type, az ), 0 )  + reserved_instance.instance_count
+			az = reserved_instance['AvailabilityZone']
+			instance_type = reserved_instance['InstanceType']
+			reserved_instances[( instance_type, az) ] = reserved_instances.get ( (instance_type, az ), 0 )  + reserved_instance['InstanceCount']
 
 	logger.debug("Reserved instances: %s"% pformat(reserved_instances))
 
@@ -70,7 +74,6 @@ def main():
 	if unused_reservations == {}:
 		print "Congratulations, you have no unused reservations"
 	else:
-		ids=""
 		for unused_reservation in unused_reservations:
 			print "UNUSED RESERVATION!\t(%s)\t%s\t%s" % ( unused_reservations[ unused_reservation ], unused_reservation[0], unused_reservation[1] )
 
@@ -81,6 +84,7 @@ def main():
 		print "Congratulations, you have no unreserved instances"
 	else:
 		for unreserved_instance in unreserved_instances:
+			ids=""
 			if args.names:
 				ids = ', '.join(sorted(instance_ids[unreserved_instance]))
 			print "Instance not reserved:\t(%s)\t%s\t%s\t%s" % ( unreserved_instances[ unreserved_instance ], unreserved_instance[0], unreserved_instance[1], ids )
