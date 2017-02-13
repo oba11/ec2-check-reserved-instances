@@ -11,7 +11,7 @@ from collections import defaultdict
 def main():
 	parser = argparse.ArgumentParser(description='Cross reference existing reservations to current instances.')
 	parser.add_argument('--log', default="WARN", help='Change log level (default: WARN)')
-	parser.add_argument('--region', default='us-east-1', help='AWS Region to connect to')
+	parser.add_argument('-r', '--region', default='us-east-1', help='AWS Region to connect to')
 	parser.add_argument('-n', '--names', help="Include names or instance IDs of instances that fit non-reservations", required=False, action='store_true')
 
 	args = parser.parse_args()
@@ -45,6 +45,7 @@ def main():
 						continue
 				tag_name = tag_name if tag_name else instance['InstanceId']
 				instance_ids[ (instance_type, az, platform ) ].append(tag_name)
+				instance_ids[ (instance_type, 'region', platform ) ].append(tag_name)
 
 	logger.debug("Running instances: %s"% pformat(running_instances))
 
@@ -54,7 +55,7 @@ def main():
 		if reserved_instance['State'] != "active":
 			logger.debug( "Excluding reserved instances %s: no longer active\n" % ( reserved_instance['ReservedInstancesId'] ) )
 		else:
-			az = reserved_instance['AvailabilityZone']
+			az = reserved_instance.get('AvailabilityZone', reserved_instance['Scope'].lower())
 			instance_type = reserved_instance['InstanceType']
 			logger.debug("Reserved instance: %s"% (reserved_instance))
 			description = reserved_instance['ProductDescription']
@@ -62,7 +63,7 @@ def main():
 				platform = u'windows'
 			else:
 				platform = u'linux'
-			reserved_instances[( instance_type, az, platform) ] = reserved_instances.get ( (instance_type, az, platform ), 0 )  + reserved_instance['InstanceCount']
+			reserved_instances[( instance_type, az, platform) ] = reserved_instances.get( (instance_type, az, platform ), 0 )  + reserved_instance['InstanceCount']
 
 	logger.debug("Reserved instances: %s"% pformat(reserved_instances))
 
@@ -76,6 +77,31 @@ def main():
 			instance_diff[placement_key] = -running_instances[placement_key]
 
 	logger.debug('Instance diff: %s'% pformat(instance_diff))
+
+	region_reservations = {}
+	for x,y in instance_diff.items()[:]:
+		if x[1] == 'region':
+			region_reservations.update({x:y})
+			instance_diff.pop(x)
+		else:
+			continue
+
+	if region_reservations:
+		region_running_instances = {}
+		for x,y in instance_diff.items()[:]:
+			x = list(x)
+			x[1] = 'region'
+			x = tuple(x)
+			region_running_instances[x] = region_running_instances.get(x, 0 )  + y
+
+		for placement_key, _ in region_running_instances.items()[:]:
+			if placement_key in region_reservations:
+				# Need to do addition because region instances come with negative (-) sign
+				region_reservations[placement_key] = region_reservations[placement_key] + region_running_instances[placement_key]
+				region_running_instances.pop(placement_key)
+
+		instance_diff = region_reservations
+		instance_diff.update(region_running_instances)
 
 	unused_reservations = dict((key,value) for key, value in instance_diff.iteritems() if value > 0)
 	if unused_reservations == {}:
@@ -112,3 +138,6 @@ def main():
 		qty_reserved_instances = 0
 
 	print "\n(%s) running on-demand instances\n(%s) reservations\n(%s) unused reservations" % ( qty_running_instances, qty_reserved_instances,qty_unused_reservations )
+
+if __name__ == '__main__':
+	main()
